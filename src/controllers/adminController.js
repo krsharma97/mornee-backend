@@ -386,14 +386,19 @@ export const getSettings = async (req, res) => {
       pool.query('SELECT * FROM payment_gateway_settings ORDER BY gateway_key')
     ]);
 
-    const gateways = gatewaysResult.rows.map(row => ({
-      id: row.id,
-      gateway_name: row.gateway_key || row.display_name,
-      displayName: row.display_name,
-      is_active: row.is_enabled || false,
-      merchant_id: row.merchant_id || '',
-      api_key: row.api_key || ''
-    }));
+    const gateways = gatewaysResult.rows.map(row => {
+      const parsed = parseGatewayConfig(row);
+      return {
+        id: row.id,
+        gateway_name: row.gateway_key || row.display_name,
+        displayName: row.display_name,
+        is_active: row.is_enabled || false,
+        merchant_id: parsed.credentials?.merchantId || '',
+        api_key: parsed.credentials?.apiKey || '',
+        key_id: parsed.credentials?.keyId || '',
+        key_secret: parsed.credentials?.keySecret || ''
+      };
+    });
 
     // Load per-status notification settings (default to empty if table missing)
     let notis = [];
@@ -522,6 +527,10 @@ export const updatePaymentGateway = async (req, res) => {
     const { gatewayKey } = req.params;
     const { displayName, isEnabled, environment, config = {} } = req.body;
 
+    console.log('Saving gateway:', gatewayKey);
+    console.log('isEnabled:', isEnabled);
+    console.log('config:', config);
+
     const existing = await pool.query(
       'SELECT * FROM payment_gateway_settings WHERE gateway_key = $1',
       [gatewayKey]
@@ -531,10 +540,15 @@ export const updatePaymentGateway = async (req, res) => {
       return res.status(404).json({ error: 'Gateway not found' });
     }
 
+    const parsed = parseGatewayConfig(existing.rows[0]);
+    console.log('Existing config:', parsed.credentials);
+
     const mergedConfig = {
-      ...parseGatewayConfig(existing.rows[0]).config,
+      ...parsed.credentials,
       ...config
     };
+
+    console.log('Merged config:', mergedConfig);
 
     const result = await pool.query(
       `UPDATE payment_gateway_settings
