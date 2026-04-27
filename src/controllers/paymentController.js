@@ -215,7 +215,6 @@ export const initiatePayment = async (req, res) => {
     res.status(500).json({ error: error.response?.data?.error || 'Failed to initiate payment' });
   }
 };
-};
 
 export const handlePaymentCallback = async (req, res) => {
   try {
