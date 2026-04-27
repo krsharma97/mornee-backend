@@ -252,6 +252,7 @@ app.use((err, req, res, next) => {
 });
 
 // SPA fallback - serve index.html for non-API routes
+// SPA fallback - serve index.html for non-API routes
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api') && !req.path.startsWith('/uploads')) {
     res.sendFile(path.join(distPath, 'index.html'));
