@@ -3,7 +3,8 @@ import {
   register,
   login,
   getProfile,
-  updateProfile
+  updateProfile,
+  changePassword
 } from '../controllers/authController.js';
 import { authenticateToken } from '../middleware/auth.js';
 
@@ -13,5 +14,6 @@ router.post('/register', register);
 router.post('/login', login);
 router.get('/profile', authenticateToken, getProfile);
 router.put('/profile', authenticateToken, updateProfile);
+router.put('/change-password', authenticateToken, changePassword);
 
 export default router;
