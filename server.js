@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import nodemailer from 'nodemailer';
 import authRoutes from './src/routes/authRoutes.js';
 import productRoutes from './src/routes/productRoutes.js';
 import cartRoutes from './src/routes/cartRoutes.js';
@@ -12,6 +11,7 @@ import paymentRoutes from './src/routes/paymentRoutes.js';
 import adminRoutes from './src/routes/adminRoutes.js';
 import { authenticateToken } from './src/middleware/auth.js';
 import pool from './src/config/database.js';
+import { buildEmailShell, sendCompanyEmail } from './src/utils/email.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -157,7 +157,11 @@ app.post('/api/admin/orders/:orderId/notify', authenticateToken, async (req, res
     }
     
     const orderResult = await pool.query(
-      'SELECT o.*, c.smtp_host, c.smtp_user, c.smtp_password, c.email as company_email FROM orders o LEFT JOIN company_settings c ON 1=1 WHERE o.id = $1',
+      `SELECT o.*, u.email as user_email, c.company_name
+       FROM orders o
+       JOIN users u ON u.id = o.user_id
+       LEFT JOIN company_settings c ON 1=1
+       WHERE o.id = $1`,
       [orderId]
     );
     
@@ -168,26 +172,18 @@ app.post('/api/admin/orders/:orderId/notify', authenticateToken, async (req, res
     const order = orderResult.rows[0];
     
     if (notifyType === 'email' || !notifyType) {
-      const transport = nodemailer.createTransport({
-        host: order.smtp_host,
-        port: order.smtp_port || 587,
-        secure: order.smtp_port === 465,
-        auth: {
-          user: order.smtp_user,
-          pass: order.smtp_password
-        }
-      });
-      
-      await transport.sendMail({
-        from: order.company_email,
-        to: order.email,
+      await sendCompanyEmail({
+        to: order.user_email,
         subject: `Order ${order.order_number} Status Update`,
-        html: `
-          <h2>Your Order ${order.order_number}</h2>
-          <p>Current Status: <strong>${order.order_status}</strong></p>
-          <p>Amount: ₹${order.final_amount}</p>
-          <p>Track your order at: https://mornee.in/orders</p>
-        `
+        html: buildEmailShell({
+          companyName: order.company_name || 'Mornee',
+          body: `
+            <h2>Your Order ${order.order_number}</h2>
+            <p>Current Status: <strong>${order.order_status}</strong></p>
+            <p>Amount: ₹${order.final_amount}</p>
+            <p>Track your order at: https://mornee.in/orders</p>
+          `
+        })
       });
     }
     

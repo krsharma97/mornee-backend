@@ -1,7 +1,8 @@
 import pool from '../config/database.js';
-import nodemailer from 'nodemailer';
-import { sendOrderEmail } from '../utils/notifications.js';
 import { v4 as uuidv4 } from 'uuid';
+import { buildEmailShell, sendCompanyEmail } from '../utils/email.js';
+
+const ONLINE_PAYMENT_METHODS = new Set(['phonepe', 'razorpay', 'card', 'upi', 'wallet']);
 
 const escapeHtml = (value) =>
   String(value ?? '')
@@ -300,6 +301,9 @@ const renderShippingLabelHtml = (order) => {
 };
 
 export const createOrder = async (req, res) => {
+  const client = await pool.connect();
+  let transactionStarted = false;
+
   try {
     const userId = req.user?.userId || 0; // Use 0 for guest checkout
     const {
@@ -316,10 +320,17 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ error: 'Shipping address and items required' });
     }
 
+    if (!payment_method || !ONLINE_PAYMENT_METHODS.has(payment_method)) {
+      return res.status(400).json({ error: 'Cash on Delivery is disabled. Please complete payment online.' });
+    }
+
+    await client.query('BEGIN');
+    transactionStarted = true;
+
     // Validate stock for all items
     for (const item of items) {
-      const productResult = await pool.query(
-        'SELECT price, discount_price, stock FROM products WHERE id = $1',
+      const productResult = await client.query(
+        'SELECT price, discount_price, stock FROM products WHERE id = $1 FOR UPDATE',
         [item.product_id]
       );
 
@@ -342,7 +353,7 @@ export const createOrder = async (req, res) => {
 
     const orderNumber = `ORD-${Date.now()}-${uuidv4().substring(0, 6).toUpperCase()}`;
 
-    const orderResult = await pool.query(
+    const orderResult = await client.query(
       `INSERT INTO orders
        (order_number, user_id, total_amount, discount_amount, tax_amount, shipping_amount, final_amount, payment_method, payment_status, shipping_address, order_status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -358,7 +369,7 @@ export const createOrder = async (req, res) => {
         payment_method,
         'pending',
         JSON.stringify(shipping_address),
-        'placed'
+        'payment_pending'
       ]
     );
 
@@ -366,38 +377,43 @@ export const createOrder = async (req, res) => {
 
     // Insert order items
     for (const item of items) {
-      const productResult = await pool.query(
+      const productResult = await client.query(
         'SELECT price, discount_price FROM products WHERE id = $1',
         [item.product_id]
       );
       const product = productResult.rows[0];
       const price = product.discount_price || product.price;
 
-      await pool.query(
+      await client.query(
         `INSERT INTO order_items
          (order_id, product_id, quantity, price, size, color)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [orderId, item.product_id, item.quantity, price, item.size, item.color]
       );
 
-      // Update product stock
-      await pool.query(
+      // Reserve stock until payment succeeds or fails.
+      await client.query(
         'UPDATE products SET stock = stock - $1 WHERE id = $2',
         [item.quantity, item.product_id]
       );
     }
 
+    await client.query('COMMIT');
+
     res.status(201).json({
       id: orderId,
       order_number: orderNumber,
       final_amount: finalAmount,
-      message: 'Order created successfully'
+      message: 'Order created. Complete payment to confirm it.'
     });
-    
-    sendOrderEmail({ order_number: orderNumber, final_amount: finalAmount, shipping_address: JSON.stringify(shipping_address), order_status: 'placed' }, 'new').catch(console.error);
   } catch (error) {
+    if (transactionStarted) {
+      await client.query('ROLLBACK');
+    }
     console.error('Create order error:', error);
     res.status(500).json({ error: 'Failed to create order' });
+  } finally {
+    client.release();
   }
 };
 
@@ -495,34 +511,27 @@ export const updateOrderStatus = async (req, res) => {
     // Attempt to notify the customer automatically via Email if SMTP is configured
     try {
       const notifyRes = await pool.query(
-        `SELECT o.*, c.smtp_host, c.smtp_user, c.smtp_password, c.email as company_email
+        `SELECT o.*, u.email as user_email, c.company_name
          FROM orders o
+         JOIN users u ON u.id = o.user_id
          LEFT JOIN company_settings c ON 1=1
          WHERE o.id = $1`,
         [orderId]
       );
       const order = notifyRes.rows[0];
-      if (order && order.email && order.smtp_host && order.smtp_user) {
-        const transporter = nodemailer.createTransport({
-          host: order.smtp_host,
-          port: order.smtp_port || 587,
-          secure: (order.smtp_port === 465),
-          auth: {
-            user: order.smtp_user,
-            pass: order.smtp_password || ''
-          }
-        });
-
-        await transporter.sendMail({
-          from: order.company_email,
-          to: order.email,
+      if (order?.user_email) {
+        await sendCompanyEmail({
+          to: order.user_email,
           subject: `Order ${order.order_number} Status Update`,
-          html: `
-            <h2>Your Order ${order.order_number}</h2>
-            <p>Current Status: <strong>${order.order_status}</strong></p>
-            <p>Amount: ₹${order.final_amount}</p>
-            <p>Track your order at: https://mornee.in/orders</p>
-          `
+          html: buildEmailShell({
+            companyName: order.company_name || 'Mornee',
+            body: `
+              <h2>Your Order ${order.order_number}</h2>
+              <p>Current Status: <strong>${order.order_status}</strong></p>
+              <p>Amount: ₹${order.final_amount}</p>
+              <p>Track your order at: https://mornee.in/orders</p>
+            `
+          })
         });
       }
     } catch (notifyErr) {

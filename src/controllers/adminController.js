@@ -8,6 +8,19 @@ const allowedStatuses = ['active', 'inactive', 'suspended'];
 // Canonical per-status order notifications
 const ORDER_STATUSES = ['processing','packed','shipped','out-for-delivery','delivered','cancelled'];
 
+const GATEWAY_DEFAULTS = {
+  phonepe: {
+    merchantId: 'PGTESTPAYUAT',
+    apiKey: 'PBPG310BCFE54b7a2',
+    saltIndex: '1',
+    baseUrl: 'https://api.phonepe.com/apis/hermes'
+  },
+  razorpay: {
+    keyId: 'rzp_test_placeholder',
+    keySecret: 'razorpay_test_secret_placeholder'
+  }
+};
+
 const parseEncryptedConfig = (value) => {
   if (!value) {
     return {};
@@ -388,17 +401,20 @@ export const getSettings = async (req, res) => {
 
     const gateways = gatewaysResult.rows.map(row => {
       const parsed = parseGatewayConfig(row);
+      const defaults = GATEWAY_DEFAULTS[row.gateway_key] || {};
       return {
         id: row.id,
         gateway_name: row.gateway_key || row.display_name,
         displayName: row.display_name,
-        is_active: row.is_enabled || false,
-        merchant_id: parsed.credentials?.merchantId || '',
-        api_key: parsed.credentials?.apiKey || '',
-        key_id: parsed.credentials?.keyId || '',
-        key_secret: parsed.credentials?.keySecret || ''
-      };
-    });
+        is_active: row.gateway_key === 'cod' ? false : row.is_enabled || false,
+        merchant_id: parsed.credentials?.merchantId || defaults.merchantId || '',
+        api_key: parsed.credentials?.apiKey || defaults.apiKey || '',
+        salt_index: parsed.credentials?.saltIndex || defaults.saltIndex || '',
+        base_url: parsed.credentials?.baseUrl || defaults.baseUrl || '',
+        key_id: parsed.credentials?.keyId || defaults.keyId || '',
+      key_secret: parsed.credentials?.keySecret || defaults.keySecret || ''
+    };
+  });
 
     // Load per-status notification settings (default to empty if table missing)
     let notis = [];
@@ -453,59 +469,70 @@ export const updateCompanySettings = async (req, res) => {
       emailProvider
     } = req.body;
 
+    const updates = [
+      'company_name = $1',
+      'legal_name = $2',
+      'email = $3',
+      'phone = $4',
+      'website = $5',
+      'address_line1 = $6',
+      'address_line2 = $7',
+      'city = $8',
+      'state = $9',
+      'postal_code = $10',
+      'country = $11',
+      'pan = $12',
+      'gst = $13',
+      "invoice_prefix = COALESCE(NULLIF($14, ''), invoice_prefix)",
+      'support_notes = $15',
+      "hsn_code = COALESCE(NULLIF($16, ''), hsn_code)",
+      'default_tax_percent = COALESCE($17, default_tax_percent)',
+      'smtp_host = $18',
+      'smtp_port = $19',
+      'smtp_user = $20',
+      'notification_email = $21',
+      'email_provider = $22'
+    ];
+
+    const values = [
+      companyName,
+      legalName,
+      email,
+      phone,
+      website,
+      addressLine1,
+      addressLine2,
+      city,
+      state,
+      postalCode,
+      country,
+      pan,
+      gst,
+      invoicePrefix,
+      supportNotes,
+      hsnCode,
+      defaultTaxPercent,
+      smtpHost,
+      smtpPort,
+      smtpUser,
+      notificationEmail,
+      emailProvider || 'smtp'
+    ];
+
+    if (smtpPassword) {
+      updates.push(`smtp_password = $${values.length + 1}`);
+      values.push(smtpPassword);
+    }
+
+    values.push(1);
+
     const result = await pool.query(
       `UPDATE company_settings
-       SET company_name = $1,
-           legal_name = $2,
-           email = $3,
-           phone = $4,
-           website = $5,
-           address_line1 = $6,
-           address_line2 = $7,
-           city = $8,
-           state = $9,
-           postal_code = $10,
-           country = $11,
-           pan = $12,
-           gst = $13,
-           invoice_prefix = COALESCE(NULLIF($14, ''), invoice_prefix),
-           support_notes = $15,
-           hsn_code = COALESCE(NULLIF($16, ''), hsn_code),
-           default_tax_percent = COALESCE($17, default_tax_percent),
-           smtp_host = $18,
-           smtp_port = $19,
-           smtp_user = $20,
-           notification_email = $22,
-           email_provider = $23,
-           ${smtpPassword ? 'smtp_password = $21,' : ''}
+       SET ${updates.join(', ')},
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = 1
+       WHERE id = $${values.length}
        RETURNING *`,
-      [
-        companyName,
-        legalName,
-        email,
-        phone,
-        website,
-        addressLine1,
-        addressLine2,
-        city,
-        state,
-        postalCode,
-        country,
-        pan,
-        gst,
-        invoicePrefix,
-        supportNotes,
-        hsnCode,
-        defaultTaxPercent,
-        smtpHost,
-        smtpPort,
-        smtpUser,
-        ...(smtpPassword ? [smtpPassword] : []),
-        notificationEmail,
-        emailProvider || 'smtp'
-      ]
+      values
     );
 
     res.json({
@@ -526,9 +553,10 @@ export const updatePaymentGateway = async (req, res) => {
 
     const { gatewayKey } = req.params;
     const { displayName, isEnabled, environment, config = {} } = req.body;
+    const normalizedIsEnabled = gatewayKey === 'cod' ? false : isEnabled;
 
     console.log('Saving gateway:', gatewayKey);
-    console.log('isEnabled:', isEnabled);
+    console.log('isEnabled:', normalizedIsEnabled);
     console.log('config:', config);
 
     const existing = await pool.query(
@@ -561,7 +589,7 @@ export const updatePaymentGateway = async (req, res) => {
        RETURNING *`,
       [
         displayName,
-        isEnabled,
+        normalizedIsEnabled,
         environment,
         serializeGatewayConfig(mergedConfig),
         gatewayKey

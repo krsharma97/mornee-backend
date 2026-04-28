@@ -27,7 +27,7 @@ const optionalAuth = (req, res, next) => {
   next();
 };
 
-router.post('/', optionalAuth, createOrder);
+router.post('/', authenticateToken, createOrder);
 router.get('/', authenticateToken, getOrders);
 router.get('/all', authenticateToken, isAdmin, getAllOrders);
 router.get('/:orderId/invoice', optionalAuth, getOrderInvoice);

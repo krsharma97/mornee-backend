@@ -69,6 +69,16 @@ try {
   `);
 
   await pool.query(`
+    ALTER TABLE company_settings
+    ADD COLUMN IF NOT EXISTS smtp_host VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS smtp_port INT,
+    ADD COLUMN IF NOT EXISTS smtp_user VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS smtp_password VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS notification_email VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS email_provider VARCHAR(50) DEFAULT 'smtp'
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS payment_gateway_settings (
       id SERIAL PRIMARY KEY,
       gateway_key VARCHAR(50) UNIQUE NOT NULL,

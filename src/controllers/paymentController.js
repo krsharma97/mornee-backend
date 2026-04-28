@@ -3,6 +3,9 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import pool from '../config/database.js';
 import { decryptSecret } from '../utils/secrets.js';
+import { sendOrderEmail } from '../utils/notifications.js';
+
+const ONLINE_PAYMENT_METHODS = new Set(['phonepe', 'razorpay', 'card', 'upi', 'wallet']);
 
 const parseEncryptedConfig = (value) => {
   if (!value) {
@@ -71,6 +74,20 @@ const generateChecksum = (payload, saltKey, saltIndex) => {
   return hash + '###' + saltIndex;
 };
 
+const appendQueryParams = (baseUrl, params) => {
+  try {
+    const url = new URL(baseUrl);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        url.searchParams.set(key, String(value));
+      }
+    });
+    return url.toString();
+  } catch (error) {
+    return baseUrl;
+  }
+};
+
 const verifyPaymentWithPhonePe = async (transactionId, config) => {
   try {
     const stringToHash = `/pg/v1/status/${config.merchantId}/${transactionId}${config.saltKey}`;
@@ -92,8 +109,30 @@ const verifyPaymentWithPhonePe = async (transactionId, config) => {
 
     return isSuccess ? data : null;
   } catch (error) {
-    console.error('PhonePe verification error:', error);
+    console.error('PhonePe verification error:', error.response?.data || error.message);
     return null;
+  }
+};
+
+const canAccessPayment = (user, orderUserId) => {
+  if (!user) {
+    return false;
+  }
+
+  return user.role === 'admin' || user.role === 'shop_manager' || user.userId === orderUserId;
+};
+
+const restoreReservedInventory = async (client, orderId) => {
+  const itemsResult = await client.query(
+    'SELECT product_id, quantity FROM order_items WHERE order_id = $1',
+    [orderId]
+  );
+
+  for (const item of itemsResult.rows) {
+    await client.query(
+      'UPDATE products SET stock = stock + $1 WHERE id = $2',
+      [item.quantity, item.product_id]
+    );
   }
 };
 
@@ -101,17 +140,22 @@ export const initiatePayment = async (req, res) => {
   try {
     const {
       orderId,
-      amount,
       redirectUrl,
       paymentMethod = 'phonepe'
     } = req.body;
 
-    if (!orderId || !amount) {
-      return res.status(400).json({ error: 'Order ID and amount required' });
+    if (!orderId) {
+      return res.status(400).json({ error: 'Order ID is required' });
+    }
+
+    if (!ONLINE_PAYMENT_METHODS.has(paymentMethod)) {
+      return res.status(400).json({ error: 'Cash on Delivery is disabled. Please complete payment online.' });
     }
 
     const orderCheck = await pool.query(
-      'SELECT id, user_id, order_number FROM orders WHERE id = $1',
+      `SELECT id, user_id, order_number, final_amount, payment_status
+       FROM orders
+       WHERE id = $1`,
       [orderId]
     );
 
@@ -120,7 +164,16 @@ export const initiatePayment = async (req, res) => {
     }
 
     const order = orderCheck.rows[0];
+    if (!canAccessPayment(req.user, order.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (order.payment_status === 'completed') {
+      return res.status(409).json({ error: 'This order has already been paid.' });
+    }
+
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const amount = Number(order.final_amount);
 
     if (paymentMethod === 'phonepe' || paymentMethod === 'card' || paymentMethod === 'upi' || paymentMethod === 'wallet') {
       const phonePe = await getPhonePeConfig();
@@ -129,13 +182,21 @@ export const initiatePayment = async (req, res) => {
       }
 
       const transactionId = `MORNEE_${Date.now()}_${uuidv4().substring(0, 8)}`;
+      const paymentRedirectUrl = appendQueryParams(
+        redirectUrl || `${frontendUrl}/payment-success`,
+        {
+          transactionId,
+          orderId,
+          gateway: 'phonepe'
+        }
+      );
 
       const payload = {
         merchantId: phonePe.merchantId,
         merchantTransactionId: transactionId,
         merchantUserId: `USER_${order.user_id}`,
-        amount: amount * 100,
-        redirectUrl: redirectUrl || `${frontendUrl}/payment-success`,
+        amount: Math.round(amount * 100),
+        redirectUrl: paymentRedirectUrl,
         redirectMode: 'REDIRECT',
         paymentInstrument: {
           type: 'PAY_PAGE'
@@ -154,6 +215,7 @@ export const initiatePayment = async (req, res) => {
 
       return res.json({
         gateway: 'phonepe',
+        orderId,
         transactionId,
         paymentUrl: `${phonePe.host}/pg/v1/pay`,
         payload: payloadBase64,
@@ -174,7 +236,7 @@ export const initiatePayment = async (req, res) => {
           currency: 'INR',
           receipt: order.order_number,
           notes: {
-            orderId: orderId,
+            orderId,
             orderNumber: order.order_number
           }
         },
@@ -196,19 +258,20 @@ export const initiatePayment = async (req, res) => {
 
       return res.json({
         gateway: 'razorpay',
+        orderId,
         transactionId,
         razorpayOrderId: razorpayOrder.data.id,
         amount: razorpayOrder.data.amount,
         currency: razorpayOrder.data.currency,
         keyId: razorpay.keyId,
-        customerName: `${order.order_number}`,
+        customerName: order.order_number,
         customerEmail: '',
         customerPhone: ''
       });
     }
 
     return res.status(400).json({
-      error: `${paymentMethod} payment is not enabled. Please use COD or contact support.`
+      error: `${paymentMethod} payment is not enabled. Please complete payment online.`
     });
   } catch (error) {
     console.error('Initiate payment error:', error.response?.data || error.message);
@@ -217,6 +280,9 @@ export const initiatePayment = async (req, res) => {
 };
 
 export const handlePaymentCallback = async (req, res) => {
+  const client = await pool.connect();
+  let transactionStarted = false;
+
   try {
     const { transactionId, razorpayResponse } = req.body;
 
@@ -225,7 +291,20 @@ export const handlePaymentCallback = async (req, res) => {
     }
 
     const paymentResult = await pool.query(
-      'SELECT id, order_id, amount, status, gateway_name FROM payments WHERE transaction_id = $1',
+      `SELECT
+         p.id,
+         p.order_id,
+         p.amount,
+         p.status,
+         p.gateway_name,
+         p.payment_method,
+         o.user_id,
+         o.order_number,
+         o.final_amount,
+         o.shipping_address
+       FROM payments p
+       JOIN orders o ON o.id = p.order_id
+       WHERE p.transaction_id = $1`,
       [transactionId]
     );
 
@@ -234,43 +313,81 @@ export const handlePaymentCallback = async (req, res) => {
     }
 
     const paymentRecord = paymentResult.rows[0];
-    
+    if (!canAccessPayment(req.user, paymentRecord.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
     if (paymentRecord.status === 'completed') {
-      return res.json({ message: 'Payment already processed', orderId: paymentRecord.order_id });
+      return res.json({
+        message: 'Payment already processed',
+        orderId: paymentRecord.order_id,
+        orderNumber: paymentRecord.order_number
+      });
+    }
+
+    if (paymentRecord.status === 'failed') {
+      return res.status(409).json({ error: 'This payment has already been marked as failed.' });
     }
 
     const isRazorpay = paymentRecord.gateway_name === 'razorpay';
-    
-    if (isRazorpay && razorpayResponse?.razorpay_payment_id) {
+    let gatewayReference = transactionId;
+    let verifiedResponse = {};
+
+    if (isRazorpay) {
+      if (
+        !razorpayResponse?.razorpay_payment_id ||
+        !razorpayResponse?.razorpay_order_id ||
+        !razorpayResponse?.razorpay_signature
+      ) {
+        return res.status(400).json({ error: 'Incomplete Razorpay payment details.' });
+      }
+
+      if (razorpayResponse.razorpay_order_id !== transactionId) {
+        return res.status(400).json({ error: 'Invalid Razorpay order reference.' });
+      }
+
       const razorpayConfig = await getRazorpayConfig();
-      const crypto = await import('crypto');
-      
-      const signatureData = razorpayResponse.razorpay_order_id + '|' + razorpayResponse.razorpay_payment_id;
-      const expectedSignature = crypto.createHmac('sha256', razorpayConfig.keySecret)
+      const signatureData = `${razorpayResponse.razorpay_order_id}|${razorpayResponse.razorpay_payment_id}`;
+      const expectedSignature = crypto
+        .createHmac('sha256', razorpayConfig.keySecret)
         .update(signatureData)
         .digest('hex');
-      
+
       if (expectedSignature !== razorpayResponse.razorpay_signature) {
         return res.status(400).json({ error: 'Invalid payment signature' });
       }
+
+      gatewayReference = razorpayResponse.razorpay_payment_id;
+      verifiedResponse = razorpayResponse;
+    } else {
+      const phonePe = await getPhonePeConfig();
+      const phonePeVerification = await verifyPaymentWithPhonePe(transactionId, phonePe);
+
+      if (!phonePeVerification) {
+        return res.status(400).json({ error: 'PhonePe payment could not be verified.' });
+      }
+
+      gatewayReference =
+        phonePeVerification?.data?.transactionId ||
+        phonePeVerification?.data?.providerReferenceId ||
+        transactionId;
+      verifiedResponse = phonePeVerification;
     }
 
-    await pool.query(
+    await client.query('BEGIN');
+    transactionStarted = true;
+
+    await client.query(
       `UPDATE payments
        SET status = $1,
            gateway_reference = $2,
            gateway_response = $3,
            updated_at = CURRENT_TIMESTAMP
        WHERE transaction_id = $4`,
-      [
-        'completed',
-        razorpayResponse?.razorpay_payment_id || transactionId,
-        JSON.stringify(razorpayResponse || {}),
-        transactionId
-      ]
+      ['completed', gatewayReference, JSON.stringify(verifiedResponse), transactionId]
     );
 
-    await pool.query(
+    await client.query(
       `UPDATE orders
        SET payment_status = $1,
            order_status = $2,
@@ -280,19 +397,149 @@ export const handlePaymentCallback = async (req, res) => {
       ['completed', 'confirmed', paymentRecord.order_id]
     );
 
-    const orderUserResult = await pool.query('SELECT user_id FROM orders WHERE id = $1', [paymentRecord.order_id]);
-    if (orderUserResult.rows.length > 0) {
-      await pool.query('DELETE FROM cart WHERE user_id = $1', [orderUserResult.rows[0].user_id]);
-    }
+    await client.query('DELETE FROM cart WHERE user_id = $1', [paymentRecord.user_id]);
+
+    await client.query('COMMIT');
+
+    sendOrderEmail(
+      {
+        order_number: paymentRecord.order_number,
+        final_amount: paymentRecord.final_amount,
+        payment_method: paymentRecord.payment_method,
+        order_status: 'confirmed',
+        shipping_address: paymentRecord.shipping_address
+      },
+      'new'
+    ).catch(console.error);
 
     res.json({
-      message: 'Payment successful. Invoice is ready to send or print.',
+      message: 'Payment successful. Your order is confirmed.',
       orderId: paymentRecord.order_id,
+      orderNumber: paymentRecord.order_number,
       transactionId
     });
   } catch (error) {
+    if (transactionStarted) {
+      await client.query('ROLLBACK');
+    }
+
     console.error('Payment callback error:', error);
     res.status(500).json({ error: 'Payment processing failed' });
+  } finally {
+    client.release();
+  }
+};
+
+export const cancelPendingPayment = async (req, res) => {
+  const client = await pool.connect();
+  let transactionStarted = false;
+
+  try {
+    const { transactionId, orderId, reason = 'cancelled' } = req.body;
+
+    if (!transactionId && !orderId) {
+      return res.status(400).json({ error: 'Transaction ID or Order ID is required' });
+    }
+
+    const paymentResult = transactionId
+      ? await pool.query(
+          `SELECT
+             p.id,
+             p.transaction_id,
+             p.order_id,
+             p.status,
+             o.user_id,
+             o.order_number
+           FROM payments p
+           JOIN orders o ON o.id = p.order_id
+           WHERE p.transaction_id = $1`,
+          [transactionId]
+        )
+      : await pool.query(
+          `SELECT
+             p.id,
+             p.transaction_id,
+             o.id AS order_id,
+             p.status,
+             o.user_id,
+             o.order_number
+           FROM orders o
+           LEFT JOIN payments p ON p.order_id = o.id
+           WHERE o.id = $1
+           ORDER BY p.created_at DESC NULLS LAST
+           LIMIT 1`,
+          [orderId]
+        );
+
+    if (paymentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Payment record not found' });
+    }
+
+    const paymentRecord = paymentResult.rows[0];
+    if (!canAccessPayment(req.user, paymentRecord.user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (paymentRecord.status === 'completed') {
+      return res.status(409).json({ error: 'This payment is already completed.' });
+    }
+
+    if (paymentRecord.status === 'failed') {
+      return res.json({
+        message: 'Payment already marked as failed.',
+        orderId: paymentRecord.order_id,
+        orderNumber: paymentRecord.order_number
+      });
+    }
+
+    await client.query('BEGIN');
+    transactionStarted = true;
+
+    if (paymentRecord.transaction_id) {
+      await client.query(
+        `UPDATE payments
+         SET status = $1,
+             gateway_response = $2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE transaction_id = $3`,
+        [
+          'failed',
+          JSON.stringify({
+            reason,
+            cancelledAt: new Date().toISOString()
+          }),
+          paymentRecord.transaction_id
+        ]
+      );
+    }
+
+    await client.query(
+      `UPDATE orders
+       SET payment_status = $1,
+           order_status = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3`,
+      ['failed', 'cancelled', paymentRecord.order_id]
+    );
+
+    await restoreReservedInventory(client, paymentRecord.order_id);
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Pending payment cancelled and reserved stock released.',
+      orderId: paymentRecord.order_id,
+      orderNumber: paymentRecord.order_number
+    });
+  } catch (error) {
+    if (transactionStarted) {
+      await client.query('ROLLBACK');
+    }
+
+    console.error('Cancel payment error:', error);
+    res.status(500).json({ error: 'Failed to cancel pending payment' });
+  } finally {
+    client.release();
   }
 };
 
@@ -320,20 +567,12 @@ export const getEnabledMethods = async (req, res) => {
   try {
     const phonePe = await getPhonePeConfig();
     const razorpay = await getRazorpayConfig();
-
-    const methods = [
-      {
-        key: 'cod',
-        name: 'Cash on Delivery',
-        type: 'cod',
-        isEnabled: true
-      }
-    ];
+    const methods = [];
 
     if (phonePe.isEnabled) {
       methods.push({
         key: 'phonepe',
-        name: 'Credit/Debit Card, UPI, Wallet',
+        name: 'PhonePe (Card / UPI / Wallet)',
         type: 'phonepe',
         isEnabled: true
       });

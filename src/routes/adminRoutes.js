@@ -16,6 +16,7 @@ import {
 import pool from '../config/database.js';
 import { authenticateToken, isAdmin } from '../middleware/auth.js';
 import { productImageUpload } from '../middleware/upload.js';
+import { buildEmailShell, getCompanyEmailSettings, sendCompanyEmail, sendEmailWithSettings } from '../utils/email.js';
 
 const router = express.Router();
 // Health check endpoint (no auth required) for frontend health checks
@@ -89,6 +90,9 @@ router.post('/settings/email-providers', authenticateToken, isAdmin, async (req,
     if (!providerName || !providerType) {
       return res.status(400).json({ error: 'Provider name and type required' });
     }
+    if (isActive) {
+      await pool.query('UPDATE email_providers SET is_active = false WHERE is_active = true');
+    }
     const result = await pool.query(
       `INSERT INTO email_providers (provider_name, provider_type, config, is_active)
        VALUES ($1, $2, $3, $4) RETURNING *`,
@@ -103,10 +107,20 @@ router.post('/settings/email-providers', authenticateToken, isAdmin, async (req,
 router.put('/settings/email-providers/:id', authenticateToken, isAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { providerName, config, isActive } = req.body;
+    const { providerName, providerType, config, isActive } = req.body;
+    if (isActive) {
+      await pool.query('UPDATE email_providers SET is_active = false WHERE id <> $1', [id]);
+    }
     const result = await pool.query(
-      `UPDATE email_providers SET provider_name = COALESCE($1, provider_name), config = COALESCE($2, config), is_active = COALESCE($3, is_active), updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *`,
-      [providerName, config ? JSON.stringify(config) : null, isActive, id]
+      `UPDATE email_providers
+       SET provider_name = COALESCE($1, provider_name),
+           provider_type = COALESCE($2, provider_type),
+           config = COALESCE($3, config),
+           is_active = COALESCE($4, is_active),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5
+       RETURNING *`,
+      [providerName, providerType, config ? JSON.stringify(config) : null, isActive, id]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Email provider not found' });
@@ -115,6 +129,72 @@ router.put('/settings/email-providers/:id', authenticateToken, isAdmin, async (r
   } catch (err) {
     console.error('Update email provider error:', err);
     res.status(500).json({ error: 'Failed to update email provider' });
+  }
+});
+
+router.post('/settings/test-email', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const {
+      to,
+      subject,
+      html,
+      text,
+      config = {}
+    } = req.body;
+
+    const companySettings = await getCompanyEmailSettings();
+    if (!companySettings) {
+      return res.status(404).json({ error: 'Company settings not found' });
+    }
+
+    const mergedSettings = {
+      ...companySettings,
+      company_name: config.companyName ?? companySettings.company_name,
+      email_provider: config.emailProvider ?? companySettings.email_provider,
+      smtp_host: config.smtpHost ?? companySettings.smtp_host,
+      smtp_port: config.smtpPort ?? companySettings.smtp_port,
+      smtp_user: config.smtpUser ?? companySettings.smtp_user,
+      smtp_password: config.smtpPassword || companySettings.smtp_password,
+      notification_email: config.notificationEmail ?? companySettings.notification_email,
+      email: config.email ?? companySettings.email
+    };
+
+    const recipient =
+      to ||
+      mergedSettings.notification_email ||
+      mergedSettings.email ||
+      mergedSettings.smtp_user;
+
+    if (!recipient) {
+      return res.status(400).json({ error: 'Recipient email is required for test email.' });
+    }
+
+    const finalSubject = subject || `Mornee test email via ${mergedSettings.email_provider || 'smtp'}`;
+    const finalHtml = buildEmailShell({
+      companyName: mergedSettings.company_name || 'Mornee',
+      body: html || `
+        <h2>Test Email</h2>
+        <p>This is a test email from Mornee.</p>
+        <p>Provider: <strong>${mergedSettings.email_provider || 'smtp'}</strong></p>
+        <p>If you received this, your email configuration is working.</p>
+      `
+    });
+
+    const result = await sendEmailWithSettings(mergedSettings, {
+      to: recipient,
+      subject: finalSubject,
+      html: finalHtml,
+      text
+    });
+
+    res.json({
+      message: `Test email sent successfully via ${result.provider}.`,
+      provider: result.provider,
+      to: recipient
+    });
+  } catch (err) {
+    console.error('Test email error:', err);
+    res.status(500).json({ error: 'Failed to send test email: ' + err.message });
   }
 });
 router.delete('/settings/email-providers/:id', authenticateToken, isAdmin, async (req, res) => {
@@ -212,50 +292,20 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
       body = body.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), val);
     }
 
-    const companyName = order.company_name || 'Mornee';
-    const senderEmail = order.notification_email || order.smtp_user || 'support@mornee.in';
+    await sendCompanyEmail({
+      to: order.user_email,
+      subject,
+      html: buildEmailShell({
+        companyName: order.company_name || 'Mornee',
+        body
+      })
+    });
 
-    // Send email
-    if (order.smtp_host && (order.smtp_user || order.email_provider)) {
-      const transporter = nodemailer.createTransport(
-        order.email_provider === 'smtp'
-          ? {
-              host: order.smtp_host,
-              port: order.smtp_port || 587,
-              secure: order.smtp_port === 465,
-              auth: { user: order.smtp_user, pass: order.smtp_password }
-            }
-          : {
-              host: order.smtp_host,
-              port: order.smtp_port || 587,
-              auth: { user: order.smtp_user, pass: order.smtp_password }
-            }
-      );
-
-      await transporter.sendMail({
-        from: `"${companyName}" <${senderEmail}>`,
-        to: order.user_email,
-        subject,
-        html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
-                 <div style="background: #4d2f8e; color: white; padding: 20px; text-align: center;">
-                   <h1 style="margin: 0;">${companyName}</h1>
-                 </div>
-                 <div style="padding: 30px;">${body}</div>
-                 <div style="background: #f8f3fb; padding: 20px; text-align: center; font-size: 12px; color: #8d738b;">
-                   <p style="margin: 0;">© ${new Date().getFullYear()} ${companyName}. All rights reserved.</p>
-                 </div>
-               </div>`
-      });
-
-      // Update order status if provided
-      if (status) {
-        await pool.query('UPDATE orders SET order_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [status, orderId]);
-      }
-
-      res.json({ message: 'Email sent successfully', status });
-    } else {
-      res.json({ message: 'Email template ready but SMTP not configured', status, subject, body });
+    if (status) {
+      await pool.query('UPDATE orders SET order_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [status, orderId]);
     }
+
+    res.json({ message: 'Email sent successfully', status });
   } catch (err) {
     console.error('Send email error:', err);
     res.status(500).json({ error: 'Failed to send email: ' + err.message });

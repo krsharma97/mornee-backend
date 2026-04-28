@@ -1,4 +1,14 @@
 import pool from './src/config/database.js';
+import { encryptSecret } from './src/utils/secrets.js';
+
+const serializeGatewayConfig = (config = {}) =>
+  JSON.stringify(
+    Object.fromEntries(
+      Object.entries(config)
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => [key, encryptSecret(value)])
+    )
+  );
 
 async function seedGateways() {
   try {
@@ -24,19 +34,30 @@ async function seedGateways() {
         key: 'razorpay',
         name: 'Razorpay',
         merchant_id: 'rzp_test_placeholder',
-        api_key: 'rzp_test_key_placeholder'
+        api_key: 'rzp_test_key_placeholder',
+        config: {
+          keyId: 'rzp_test_placeholder',
+          keySecret: 'razorpay_test_secret_placeholder'
+        }
       },
       {
         key: 'phonepe',
         name: 'PhonePe',
-        merchant_id: '',
-        api_key: ''
+        merchant_id: 'PGTESTPAYUAT',
+        api_key: 'PBPG310BCFE54b7a2',
+        config: {
+          merchantId: 'PGTESTPAYUAT',
+          apiKey: 'PBPG310BCFE54b7a2',
+          saltIndex: '1',
+          baseUrl: 'https://api.phonepe.com/apis/hermes'
+        }
       },
       {
         key: 'cod',
         name: 'Cash on Delivery (COD)',
         merchant_id: null,
-        api_key: null
+        api_key: null,
+        config: {}
       }
     ];
 
@@ -50,13 +71,22 @@ async function seedGateways() {
         await pool.query(
           `INSERT INTO payment_gateway_settings (gateway_key, display_name, merchant_id, api_key, is_enabled, config_encrypted)
            VALUES ($1, $2, $3, $4, $5, $6)`,
-          [gw.key, gw.name, gw.merchant_id, gw.api_key, gw.key === 'cod', JSON.stringify({})]
+          [gw.key, gw.name, gw.merchant_id, gw.api_key, false, serializeGatewayConfig(gw.config || {})]
         );
         console.log(`Added: ${gw.name}`);
       } else {
         await pool.query(
-          `UPDATE payment_gateway_settings SET display_name = $1 WHERE gateway_key = $2`,
-          [gw.name, gw.key]
+          `UPDATE payment_gateway_settings
+           SET display_name = $1,
+               merchant_id = COALESCE($2, merchant_id),
+               api_key = COALESCE($3, api_key),
+               is_enabled = CASE WHEN gateway_key = 'cod' THEN false ELSE is_enabled END,
+               config_encrypted = CASE
+                 WHEN config_encrypted IS NULL OR config_encrypted = '{}'::jsonb THEN $4
+                 ELSE config_encrypted
+               END
+           WHERE gateway_key = $5`,
+          [gw.name, gw.merchant_id, gw.api_key, serializeGatewayConfig(gw.config || {}), gw.key]
         );
         console.log(`Updated: ${gw.name}`);
       }

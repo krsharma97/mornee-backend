@@ -1,75 +1,52 @@
-import nodemailer from 'nodemailer';
-import pool from '../config/database.js';
-
-let transporter = null;
-
-const initTransporter = async () => {
-  if (transporter) return transporter;
-  
-  const companyResult = await pool.query('SELECT * FROM company_settings WHERE id = 1');
-  const company = companyResult.rows[0] || {};
-  
-  if (company.smtp_host && company.smtp_user && company.smtp_password) {
-    transporter = nodemailer.createTransport({
-      host: company.smtp_host,
-      port: company.smtp_port || 587,
-      secure: company.smtp_port === 465,
-      auth: {
-        user: company.smtp_user,
-        pass: company.smtp_password
-      }
-    });
-  }
-  return transporter;
-};
+import { buildEmailShell, getCompanyEmailSettings, sendEmailWithSettings } from './email.js';
 
 export const sendOrderEmail = async (order, type = 'new') => {
   try {
-    const transport = await initTransporter();
-    if (!transport) {
-      console.log('Email not configured - skipping email');
+    const company = await getCompanyEmailSettings();
+    if (!company) {
+      console.log('Company settings not configured - skipping email');
       return;
     }
-    
-    const companyResult = await pool.query('SELECT * FROM company_settings WHERE id = 1');
-    const company = companyResult.rows[0] || {};
-    const companyEmail = company.email || company.smtp_user;
-    
-    if (!companyEmail) {
-      console.log('Company email not set - skipping email');
+
+    const recipient = company.notification_email || company.email || company.smtp_user;
+    if (!recipient) {
+      console.log('Notification recipient not configured - skipping email');
       return;
     }
-    
-    let subject, html;
-    
+
+    let subject = `Mornee Notification`;
+    let body = '<p>No content available.</p>';
+
     if (type === 'new') {
       subject = `New Order ${order.order_number} - Mornee`;
-      html = `
+      body = `
         <h2>New Order Received!</h2>
         <p>Order Number: <strong>${order.order_number}</strong></p>
-        <p>Customer: ${order.customer_name || order.email}</p>
+        <p>Customer: ${order.customer_name || order.email || 'N/A'}</p>
         <p>Amount: ₹${order.final_amount}</p>
-        <p>Payment Method: ${order.payment_method}</p>
-        <p>Status: ${order.order_status}</p>
-        <p>Shipping Address: ${order.shipping_address}</p>
+        <p>Payment Method: ${order.payment_method || 'N/A'}</p>
+        <p>Status: ${order.order_status || 'N/A'}</p>
+        <p>Shipping Address: ${order.shipping_address || 'N/A'}</p>
       `;
     } else if (type === 'status') {
       subject = `Order ${order.order_number} Status Update - Mornee`;
-      html = `
+      body = `
         <h2>Order Status Updated</h2>
         <p>Order Number: <strong>${order.order_number}</strong></p>
         <p>New Status: <strong>${order.order_status}</strong></p>
         <p>Track your order at: https://mornee.in/orders</p>
       `;
     }
-    
-    await transport.sendMail({
-      from: companyEmail,
-      to: companyEmail,
-      subject: subject,
-      html: html
+
+    await sendEmailWithSettings(company, {
+      to: recipient,
+      subject,
+      html: buildEmailShell({
+        companyName: company.company_name || 'Mornee',
+        body
+      })
     });
-    
+
     console.log(`Email sent for order ${order.order_number}`);
   } catch (err) {
     console.error('Email send error:', err.message);
