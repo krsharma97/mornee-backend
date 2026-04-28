@@ -1,8 +1,11 @@
 import pool from '../config/database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { buildEmailShell, sendCompanyEmail } from '../utils/email.js';
-
-const ONLINE_PAYMENT_METHODS = new Set(['phonepe', 'razorpay', 'card', 'upi', 'wallet']);
+import {
+  COD_PAYMENT_METHOD,
+  isPaymentMethodEnabled
+} from '../utils/paymentMethods.js';
+import { sendOrderEmail } from '../utils/notifications.js';
 
 const escapeHtml = (value) =>
   String(value ?? '')
@@ -320,9 +323,19 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ error: 'Shipping address and items required' });
     }
 
-    if (!payment_method || !ONLINE_PAYMENT_METHODS.has(payment_method)) {
-      return res.status(400).json({ error: 'Cash on Delivery is disabled. Please complete payment online.' });
+    if (!payment_method) {
+      return res.status(400).json({ error: 'Payment method is required.' });
     }
+
+    if (!(await isPaymentMethodEnabled(payment_method))) {
+      return res.status(400).json({
+        error: payment_method === COD_PAYMENT_METHOD
+          ? 'Cash on Delivery is disabled right now.'
+          : 'Selected payment method is not available right now.'
+      });
+    }
+
+    const isCodOrder = payment_method === COD_PAYMENT_METHOD;
 
     await client.query('BEGIN');
     transactionStarted = true;
@@ -335,11 +348,15 @@ export const createOrder = async (req, res) => {
       );
 
       if (productResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        transactionStarted = false;
         return res.status(404).json({ error: `Product ${item.product_id} not found` });
       }
 
       const product = productResult.rows[0];
       if (product.stock < item.quantity) {
+        await client.query('ROLLBACK');
+        transactionStarted = false;
         return res.status(400).json({ error: `Insufficient stock for product ${item.product_id}` });
       }
     }
@@ -369,7 +386,7 @@ export const createOrder = async (req, res) => {
         payment_method,
         'pending',
         JSON.stringify(shipping_address),
-        'payment_pending'
+        isCodOrder ? 'confirmed' : 'payment_pending'
       ]
     );
 
@@ -398,13 +415,33 @@ export const createOrder = async (req, res) => {
       );
     }
 
+    if (isCodOrder && userId) {
+      await client.query('DELETE FROM cart WHERE user_id = $1', [userId]);
+    }
+
     await client.query('COMMIT');
+
+    if (isCodOrder) {
+      sendOrderEmail(
+        {
+          order_number: orderNumber,
+          final_amount: finalAmount,
+          payment_method,
+          order_status: 'confirmed',
+          customer_name,
+          shipping_address: JSON.stringify(shipping_address)
+        },
+        'new'
+      ).catch(console.error);
+    }
 
     res.status(201).json({
       id: orderId,
       order_number: orderNumber,
       final_amount: finalAmount,
-      message: 'Order created. Complete payment to confirm it.'
+      message: isCodOrder
+        ? 'Order placed successfully. Payment will be collected on delivery.'
+        : 'Order created. Complete payment to confirm it.'
     });
   } catch (error) {
     if (transactionStarted) {

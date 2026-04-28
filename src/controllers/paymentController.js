@@ -4,8 +4,11 @@ import { v4 as uuidv4 } from 'uuid';
 import pool from '../config/database.js';
 import { decryptSecret } from '../utils/secrets.js';
 import { sendOrderEmail } from '../utils/notifications.js';
-
-const ONLINE_PAYMENT_METHODS = new Set(['phonepe', 'razorpay', 'card', 'upi', 'wallet']);
+import {
+  COD_PAYMENT_METHOD,
+  ONLINE_PAYMENT_METHODS,
+  PHONEPE_PAYMENT_METHODS
+} from '../utils/paymentMethods.js';
 
 const parseEncryptedConfig = (value) => {
   if (!value) {
@@ -60,7 +63,7 @@ const getPhonePeConfig = async () => {
   const config = dbGateway?.config || {};
 
   return {
-    isEnabled: dbGateway?.isEnabled ?? true,
+    isEnabled: dbGateway?.isEnabled ?? false,
     host: config.baseUrl || process.env.PHONEPE_BASE_URL || 'https://api.phonepe.com/apis/hermes',
     merchantId: config.merchantId || process.env.PHONEPE_MERCHANT_ID || 'PGTESTPAYUAT',
     saltKey: config.apiKey || process.env.PHONEPE_API_KEY || 'PBPG310BCFE54b7a2',
@@ -148,8 +151,12 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ error: 'Order ID is required' });
     }
 
+    if (paymentMethod === COD_PAYMENT_METHOD) {
+      return res.status(400).json({ error: 'Cash on Delivery orders do not require online payment.' });
+    }
+
     if (!ONLINE_PAYMENT_METHODS.has(paymentMethod)) {
-      return res.status(400).json({ error: 'Cash on Delivery is disabled. Please complete payment online.' });
+      return res.status(400).json({ error: 'Selected payment method is not available right now.' });
     }
 
     const orderCheck = await pool.query(
@@ -175,7 +182,7 @@ export const initiatePayment = async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const amount = Number(order.final_amount);
 
-    if (paymentMethod === 'phonepe' || paymentMethod === 'card' || paymentMethod === 'upi' || paymentMethod === 'wallet') {
+    if (PHONEPE_PAYMENT_METHODS.has(paymentMethod)) {
       const phonePe = await getPhonePeConfig();
       if (!phonePe.isEnabled) {
         return res.status(400).json({ error: 'PhonePe is disabled in admin settings' });
@@ -565,8 +572,11 @@ export const getPaymentStatus = async (req, res) => {
 
 export const getEnabledMethods = async (req, res) => {
   try {
-    const phonePe = await getPhonePeConfig();
-    const razorpay = await getRazorpayConfig();
+    const [phonePe, razorpay, cod] = await Promise.all([
+      getPhonePeConfig(),
+      getRazorpayConfig(),
+      loadGatewaySettings(COD_PAYMENT_METHOD)
+    ]);
     const methods = [];
 
     if (phonePe.isEnabled) {
@@ -583,6 +593,15 @@ export const getEnabledMethods = async (req, res) => {
         key: 'razorpay',
         name: 'Razorpay',
         type: 'razorpay',
+        isEnabled: true
+      });
+    }
+
+    if (cod?.isEnabled) {
+      methods.push({
+        key: COD_PAYMENT_METHOD,
+        name: 'Cash on Delivery',
+        type: COD_PAYMENT_METHOD,
         isEnabled: true
       });
     }

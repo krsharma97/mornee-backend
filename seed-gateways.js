@@ -80,7 +80,6 @@ async function seedGateways() {
            SET display_name = $1,
                merchant_id = COALESCE($2, merchant_id),
                api_key = COALESCE($3, api_key),
-               is_enabled = CASE WHEN gateway_key = 'cod' THEN false ELSE is_enabled END,
                config_encrypted = CASE
                  WHEN config_encrypted IS NULL OR config_encrypted = '{}'::jsonb THEN $4
                  ELSE config_encrypted

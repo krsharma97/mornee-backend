@@ -83,12 +83,20 @@ try {
       id SERIAL PRIMARY KEY,
       gateway_key VARCHAR(50) UNIQUE NOT NULL,
       display_name VARCHAR(100) NOT NULL,
+      merchant_id VARCHAR(255),
+      api_key VARCHAR(255),
       is_enabled BOOLEAN DEFAULT false,
       environment VARCHAR(20) DEFAULT 'test',
       config_encrypted TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE payment_gateway_settings
+    ADD COLUMN IF NOT EXISTS merchant_id VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS api_key VARCHAR(255)
   `);
 
   await pool.query(`
@@ -123,7 +131,7 @@ try {
     VALUES
       ('phonepe', 'PhonePe', false, 'test'),
       ('razorpay', 'Razorpay', false, 'test'),
-      ('cod', 'Cash on Delivery', true, 'live')
+      ('cod', 'Cash on Delivery', false, 'live')
     ON CONFLICT (gateway_key) DO NOTHING
   `);
 

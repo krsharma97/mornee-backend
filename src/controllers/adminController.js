@@ -402,11 +402,11 @@ export const getSettings = async (req, res) => {
     const gateways = gatewaysResult.rows.map(row => {
       const parsed = parseGatewayConfig(row);
       const defaults = GATEWAY_DEFAULTS[row.gateway_key] || {};
-      return {
+    return {
         id: row.id,
         gateway_name: row.gateway_key || row.display_name,
         displayName: row.display_name,
-        is_active: row.gateway_key === 'cod' ? false : row.is_enabled || false,
+        is_active: row.is_enabled || false,
         merchant_id: parsed.credentials?.merchantId || defaults.merchantId || '',
         api_key: parsed.credentials?.apiKey || defaults.apiKey || '',
         salt_index: parsed.credentials?.saltIndex || defaults.saltIndex || '',
@@ -553,7 +553,7 @@ export const updatePaymentGateway = async (req, res) => {
 
     const { gatewayKey } = req.params;
     const { displayName, isEnabled, environment, config = {} } = req.body;
-    const normalizedIsEnabled = gatewayKey === 'cod' ? false : isEnabled;
+    const normalizedIsEnabled = typeof isEnabled === 'boolean' ? isEnabled : null;
 
     console.log('Saving gateway:', gatewayKey);
     console.log('isEnabled:', normalizedIsEnabled);
