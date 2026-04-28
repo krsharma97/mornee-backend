@@ -19,6 +19,18 @@ import { productImageUpload } from '../middleware/upload.js';
 import { buildEmailShell, getCompanyEmailSettings, sendCompanyEmail, sendEmailWithSettings } from '../utils/email.js';
 
 const router = express.Router();
+const ORDER_NOTIFICATION_STATUSES = ['processing', 'packed', 'shipped', 'out-for-delivery', 'delivered', 'cancelled'];
+
+const ensureOrderNotificationRows = async () => {
+  for (const status of ORDER_NOTIFICATION_STATUSES) {
+    await pool.query(
+      `INSERT INTO order_notifications (status, enabled)
+       VALUES ($1, true)
+       ON CONFLICT (status) DO NOTHING`,
+      [status]
+    );
+  }
+};
 // Health check endpoint (no auth required) for frontend health checks
 router.get('/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -211,6 +223,50 @@ router.delete('/settings/email-providers/:id', authenticateToken, isAdmin, async
   }
 });
 
+router.get('/settings/order-notifications', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    await ensureOrderNotificationRows();
+    const result = await pool.query(
+      'SELECT status, enabled FROM order_notifications ORDER BY status'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get order notifications error:', err);
+    res.status(500).json({ error: 'Failed to load order notifications' });
+  }
+});
+
+router.put('/settings/order-notifications/:status', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const { status } = req.params;
+    const { enabled } = req.body;
+
+    if (!ORDER_NOTIFICATION_STATUSES.includes(status)) {
+      return res.status(400).json({ error: 'Invalid order notification status' });
+    }
+
+    await ensureOrderNotificationRows();
+
+    const result = await pool.query(
+      `INSERT INTO order_notifications (status, enabled)
+       VALUES ($1, $2)
+       ON CONFLICT (status) DO UPDATE SET
+         enabled = EXCLUDED.enabled,
+         updated_at = CURRENT_TIMESTAMP
+       RETURNING status, enabled`,
+      [status, Boolean(enabled)]
+    );
+
+    res.json({
+      message: 'Order notification updated successfully',
+      notification: result.rows[0]
+    });
+  } catch (err) {
+    console.error('Update order notification error:', err);
+    res.status(500).json({ error: 'Failed to update order notification' });
+  }
+});
+
 // Order status email templates
 router.get('/order-templates', authenticateToken, isAdmin, async (req, res) => {
   try {
@@ -246,6 +302,19 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
   try {
     const { orderId } = req.params;
     const { status } = req.body;
+    const effectiveStatus = status || null;
+
+    if (effectiveStatus) {
+      await ensureOrderNotificationRows();
+      const toggleResult = await pool.query(
+        'SELECT enabled FROM order_notifications WHERE status = $1',
+        [effectiveStatus]
+      );
+
+      if (toggleResult.rows.length > 0 && toggleResult.rows[0].enabled === false) {
+        return res.status(409).json({ error: `Order notification for ${effectiveStatus} is turned off.` });
+      }
+    }
 
     const orderResult = await pool.query(
       `SELECT o.*, u.first_name, u.last_name, u.email as user_email,
@@ -263,9 +332,10 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
     }
 
     const order = orderResult.rows[0];
+    const templateStatus = effectiveStatus || order.order_status;
     const templateResult = await pool.query(
       'SELECT * FROM order_status_templates WHERE status = $1 AND enabled = true',
-      [status]
+      [templateStatus]
     );
 
     if (templateResult.rows.length === 0) {

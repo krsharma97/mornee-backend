@@ -510,6 +510,20 @@ export const updateOrderStatus = async (req, res) => {
     const updatedOrder = result.rows[0];
     // Attempt to notify the customer automatically via Email if SMTP is configured
     try {
+      const notificationResult = await pool.query(
+        'SELECT enabled FROM order_notifications WHERE status = $1',
+        [updatedOrder.order_status]
+      );
+      const notificationsEnabled =
+        notificationResult.rows.length === 0 || notificationResult.rows[0].enabled !== false;
+
+      if (!notificationsEnabled) {
+        return res.json({
+          message: 'Order status updated',
+          order: updatedOrder
+        });
+      }
+
       const notifyRes = await pool.query(
         `SELECT o.*, u.email as user_email, c.company_name
          FROM orders o
