@@ -386,6 +386,10 @@ router.post(
   authenticateToken,
   isAdmin,
   (req, res, next) => {
+    console.log('Upload route hit');
+    next();
+  },
+  (req, res, next) => {
     const upload = productImageUpload.fields([
       { name: 'images', maxCount: 10 },
       { name: 'image', maxCount: 10 }
