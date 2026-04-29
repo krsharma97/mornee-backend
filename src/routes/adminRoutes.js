@@ -389,13 +389,6 @@ router.post(
     { name: 'images', maxCount: 10 },
     { name: 'image', maxCount: 10 }
   ]),
-  (err, req, res, next) => {
-    if (err) {
-      console.error('Multer error:', err.message, err.code);
-      return res.status(400).json({ error: err.message || 'Upload failed' });
-    }
-    next();
-  },
   uploadProductImages
 );
 
