@@ -385,10 +385,19 @@ router.post(
   '/upload',
   authenticateToken,
   isAdmin,
-  productImageUpload.fields([
-    { name: 'images', maxCount: 10 },
-    { name: 'image', maxCount: 10 }
-  ]),
+  (req, res, next) => {
+    const upload = productImageUpload.fields([
+      { name: 'images', maxCount: 10 },
+      { name: 'image', maxCount: 10 }
+    ]);
+    upload(req, res, (err) => {
+      if (err) {
+        console.error('Multer upload error:', err);
+        return res.status(400).json({ error: err.message || 'Upload failed' });
+      }
+      next();
+    });
+  },
   uploadProductImages
 );
 
