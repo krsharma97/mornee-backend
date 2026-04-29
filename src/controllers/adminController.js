@@ -608,8 +608,12 @@ export const updatePaymentGateway = async (req, res) => {
 
 export const uploadProductImages = async (req, res) => {
   try {
+    console.log('Upload request received');
+    console.log('Files:', req.files);
+    console.log('Body:', req.body);
+    
     const uploadedFiles = [];
-
+    
     if (req.files) {
       if (Array.isArray(req.files)) {
         uploadedFiles.push(...req.files);
@@ -619,7 +623,9 @@ export const uploadProductImages = async (req, res) => {
         }
       }
     }
-
+    
+    console.log('Total uploaded files:', uploadedFiles.length);
+    
     if (uploadedFiles.length === 0) {
       return res.status(400).json({ error: 'No images uploaded' });
     }
