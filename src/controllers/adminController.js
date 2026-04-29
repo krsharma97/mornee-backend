@@ -624,7 +624,7 @@ export const uploadProductImages = async (req, res) => {
       return res.status(400).json({ error: 'No images uploaded' });
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = process.env.BACKEND_URL || process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
     const images = uploadedFiles.map((file) => ({
       filename: file.filename,
       originalName: file.originalname,
