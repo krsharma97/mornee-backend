@@ -383,7 +383,7 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
 });
 // Test upload route without auth
 router.post(
-  '/upload-test',
+  '/upload-test', 
   (req, res, next) => {
     const upload = productImageUpload.fields([
       { name: 'images', maxCount: 10 },
@@ -391,13 +391,33 @@ router.post(
     ]);
     upload(req, res, (err) => {
       if (err) {
-        console.error('Multer error:', err);
+        console.error('Multer error:', err.message);
         return res.status(400).json({ error: err.message });
       }
       console.log('Test upload - Files:', req.files);
       res.json({ files: req.files });
     });
   }
+);
+
+router.post(
+  '/upload',
+  authenticateToken,
+  isAdmin,
+  (req, res, next) => {
+    const upload = productImageUpload.fields([
+      { name: 'images', maxCount: 10 },
+      { name: 'image', maxCount: 10 }
+    ]);
+    upload(req, res, (err) => {
+      if (err) {
+        console.error('Multer error:', err.message);
+        return res.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  uploadProductImages
 );
 
 router.post(
