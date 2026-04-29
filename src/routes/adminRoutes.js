@@ -381,6 +381,20 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
     res.status(500).json({ error: 'Failed to send email: ' + err.message });
   }
 });
+// Test upload route without auth
+router.post(
+  '/upload-test',
+  productImageUpload.fields([
+    { name: 'images', maxCount: 10 },
+    { name: 'image', maxCount: 10 }
+  ]),
+  (req, res) => {
+    console.log('Test upload hit');
+    console.log('Files:', req.files);
+    res.json({ files: req.files });
+  }
+);
+
 router.post(
   '/upload',
   authenticateToken,
