@@ -129,5 +129,35 @@ export const productImageUpload = {
         next();
       });
     };
+  },
+
+  fields: (fieldsConfig) => {
+    return (req, res, next) => {
+      const multerUpload = upload.fields(fieldsConfig);
+      multerUpload(req, res, async (err) => {
+        if (err) return next(err);
+
+        const allFiles = [];
+        if (req.files) {
+          for (const fieldFiles of Object.values(req.files)) {
+            allFiles.push(...fieldFiles);
+          }
+        }
+
+        if (allFiles.length > 0) {
+          const optimizePromises = allFiles.map(async (file) => {
+            try {
+              await optimizeImage(file.path);
+            } catch (optimizeErr) {
+              console.error('Failed to optimize image:', optimizeErr);
+            }
+          });
+
+          await Promise.all(optimizePromises);
+        }
+
+        next();
+      });
+    };
   }
 };

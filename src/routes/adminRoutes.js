@@ -381,7 +381,16 @@ router.post('/orders/:orderId/send-email', authenticateToken, isAdmin, async (re
     res.status(500).json({ error: 'Failed to send email: ' + err.message });
   }
 });
-router.post('/upload', authenticateToken, isAdmin, productImageUpload.array('images', 10), uploadProductImages);
+router.post(
+  '/upload',
+  authenticateToken,
+  isAdmin,
+  productImageUpload.fields([
+    { name: 'images', maxCount: 10 },
+    { name: 'image', maxCount: 10 }
+  ]),
+  uploadProductImages
+);
 
 router.get('/public/categories', async (req, res) => {
   try {

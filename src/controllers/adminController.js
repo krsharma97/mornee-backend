@@ -608,12 +608,24 @@ export const updatePaymentGateway = async (req, res) => {
 
 export const uploadProductImages = async (req, res) => {
   try {
-    if (!req.files || req.files.length === 0) {
+    const uploadedFiles = [];
+
+    if (req.files) {
+      if (Array.isArray(req.files)) {
+        uploadedFiles.push(...req.files);
+      } else {
+        for (const fieldFiles of Object.values(req.files)) {
+          uploadedFiles.push(...fieldFiles);
+        }
+      }
+    }
+
+    if (uploadedFiles.length === 0) {
       return res.status(400).json({ error: 'No images uploaded' });
     }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const images = req.files.map((file) => ({
+    const images = uploadedFiles.map((file) => ({
       filename: file.filename,
       originalName: file.originalname,
       url: `${baseUrl}/uploads/products/${file.filename}`
