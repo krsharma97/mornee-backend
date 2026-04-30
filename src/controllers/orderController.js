@@ -122,9 +122,15 @@ const getOrderDocumentPayload = async (orderId) => {
 const renderInvoiceHtml = (order) => {
   const itemsHtml = order.items
     .map(
+    .map(
       (item) => `
         <tr>
-          <td>${escapeHtml(item.name)}</td>
+          <td>
+            <div style="display: flex; align-items: center; gap: 12px;">
+              ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="Product" style="width: 48px; height: 48px; object-fit: cover; border-radius: 8px; border: 1px solid #eee3eb;" />` : ''}
+              <span>${escapeHtml(item.name)}</span>
+            </div>
+          </td>
           <td>${escapeHtml(item.size || '-')}</td>
           <td>${escapeHtml(item.color || '-')}</td>
           <td>${item.quantity}</td>
@@ -169,7 +175,10 @@ const renderInvoiceHtml = (order) => {
         <div class="topbar">
           <div>
             <span class="badge">Invoice</span>
-            <h1 style="margin-top:16px;">${escapeHtml(company.company_name || 'Mornee')}</h1>
+            <div style="margin-top:16px; display: flex; align-items: center; gap: 16px;">
+              <img src="/favicon.png" alt="Logo" style="width: 48px; height: 48px; object-fit: contain; border-radius: 8px;" onerror="this.style.display='none'" />
+              <h1 style="margin: 0;">${escapeHtml(company.company_name || 'Mornee')}</h1>
+            </div>
             <p class="muted" style="margin-top:8px;">${escapeHtml(company.legal_name || company.company_name || 'Mornee')}</p>
             <p class="muted" style="margin-top:8px;">${escapeHtml(company.address_line1 || '')} ${escapeHtml(company.address_line2 || '')}</p>
             <p class="muted">${escapeHtml([company.city, company.state, company.postal_code].filter(Boolean).join(', '))}</p>
@@ -714,5 +723,46 @@ export const getOrderShippingLabel = async (req, res) => {
   } catch (error) {
     console.error('Get shipping label error:', error);
     res.status(500).json({ error: 'Failed to generate shipping label' });
+  }
+};
+
+export const bulkUpdateOrderStatus = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { orderIds, orderStatus } = req.body;
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ error: 'Order IDs are required as an array' });
+    }
+
+    const ALLOWED_STATUSES = ['processing', 'packed', 'shipped', 'out-for-delivery', 'delivered', 'cancelled'];
+    if (orderStatus && !ALLOWED_STATUSES.includes(orderStatus)) {
+      return res.status(400).json({ error: 'Invalid order status' });
+    }
+
+    await client.query('BEGIN');
+
+    for (const orderId of orderIds) {
+      await client.query(
+        `UPDATE orders
+         SET order_status = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [orderStatus, orderId]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: `${orderIds.length} orders updated to ${orderStatus} successfully`,
+      updatedCount: orderIds.length
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Bulk update order error:', error);
+    res.status(500).json({ error: 'Failed to update orders' });
+  } finally {
+    client.release();
   }
 };

@@ -7,7 +7,8 @@ import {
   getAllOrders,
   getOrderInvoice,
   getOrderInvoiceDownload,
-  getOrderShippingLabel
+  getOrderShippingLabel,
+  bulkUpdateOrderStatus
 } from '../controllers/orderController.js';
 import { authenticateToken, isAdmin } from '../middleware/auth.js';
 import { extractToken, verifyToken } from '../utils/jwt.js';
@@ -34,6 +35,7 @@ router.get('/:orderId/invoice', optionalAuth, getOrderInvoice);
 router.get('/:orderId/invoice-download', optionalAuth, getOrderInvoiceDownload);
 router.get('/:orderId/shipping-label', optionalAuth, getOrderShippingLabel);
 router.get('/:orderId', authenticateToken, getOrderById);
+router.put('/bulk-status', authenticateToken, isAdmin, bulkUpdateOrderStatus);
 router.put('/:orderId/status', authenticateToken, isAdmin, updateOrderStatus);
 
 export default router;
