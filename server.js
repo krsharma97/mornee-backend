@@ -29,7 +29,7 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-const uploadsPath = path.join(__dirname, '..', 'uploads');
+const uploadsPath = path.join(__dirname, 'uploads');
 app.use('/uploads', express.static(uploadsPath));
 
 // Serve frontend static build in production
