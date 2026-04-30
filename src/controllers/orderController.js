@@ -122,7 +122,6 @@ const getOrderDocumentPayload = async (orderId) => {
 const renderInvoiceHtml = (order) => {
   const itemsHtml = order.items
     .map(
-    .map(
       (item) => `
         <tr>
           <td>
